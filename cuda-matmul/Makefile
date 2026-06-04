@@ -17,7 +17,15 @@ CHECK_MAX  ?= 2048        # skip CPU correctness check for N > this; 0 = skip al
 REPEATS    ?= 10
 WARMUP     ?= 2
 
-.PHONY: all clean run dirs
+# Sweep parameters (used by the 'sweep' target)
+SWEEP_TILE_DIMS  ?= 8,16,32
+SWEEP_BLOCK_DIMS ?= 16
+SWEEP_SIZES      ?= 256,512,1024,2048,4096
+SWEEP_CHECK_MAX  ?= 1024
+SWEEP_CSV        := $(RESULTS)/matmul_sweep.csv
+PYTHON           ?= python3
+
+.PHONY: all clean run sweep plot dirs
 
 all: dirs $(BIN)
 
@@ -36,6 +44,22 @@ run: all
 	  --repeats   $(REPEATS)                    \
 	  --warmup    $(WARMUP)                     \
 	  --check-max $(CHECK_MAX)
+
+sweep: all
+	$(PYTHON) ../scripts/bench_matmul.py \
+	  --binary    $(BIN)              \
+	  --sizes     $(SWEEP_SIZES)      \
+	  --tile-dims $(SWEEP_TILE_DIMS)  \
+	  --block-dims $(SWEEP_BLOCK_DIMS) \
+	  --repeats   $(REPEATS)          \
+	  --warmup    $(WARMUP)           \
+	  --check-max $(SWEEP_CHECK_MAX)  \
+	  --output    $(SWEEP_CSV)
+
+plot:
+	$(PYTHON) ../scripts/plot_matmul.py \
+	  --csv        $(SWEEP_CSV) \
+	  --output-dir $(RESULTS)
 
 clean:
 	rm -rf $(BUILD_DIR)
