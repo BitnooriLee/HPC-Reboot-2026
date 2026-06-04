@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+bin/
+obj/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# CUDA
+*.cubin
+*.ptx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Results (keep structure, ignore large/generated data)
+results/**/*.csv
+results/**/*.json
+results/**/*.png
+results/**/*.pdf
+!results/.gitkeep
+!results/README.md
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Profiling
+*.nsys-rep
+*.ncu-rep
+gmon.out
+perf.data*
