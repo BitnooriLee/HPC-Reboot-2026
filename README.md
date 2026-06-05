@@ -11,10 +11,7 @@ and CSVs from every run.
 
 ## Motivation
 
-DAT400 at the University of Stavanger introduced the foundational machinery of
-modern HPC: GPU thread hierarchies, distributed-memory communication patterns,
-the memory wall, and performance-bound reasoning. ISC 2026 is an opportunity to
-engage with that material again — not as coursework, but as a practitioner
+DAT400 High Performance Parallel Programming at Chalmers University of Technology introduced the foundational machinery of modern HPC: GPU thread hierarchies, distributed-memory communication patterns, the memory wall, and performance-bound reasoning. ISC 2026 is an opportunity to engage with that material again — not as coursework, but as a practitioner
 asking sharper questions:
 
 - Where exactly does a naive CUDA GEMM leave performance on the table, and how
