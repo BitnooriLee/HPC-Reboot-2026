@@ -212,13 +212,52 @@ ISPC tasks are backed by a thread pool (`tasksys.cpp` maintains a fixed set of w
 
 ---
 
-*[ To be completed ]*
+**Platform note:** Results use NEON 4-wide on Apple Silicon. The assignment targets AVX2 8-wide on myth machines.
 
 ### Task 1: SIMD and Multi-core Speedup
 
+Baseline with random input values in range [0.001, 2.999]:
+
+| Version | Time (ms) | Speedup |
+|---|---|---|
+| Serial | 722.5 | 1.00x |
+| ISPC (SIMD only) | 269.9 | **2.68x** |
+| ISPC with tasks | 44.6 | **16.21x** |
+
+- **SIMD speedup (2.68x):** NEON 4-wide theoretical max is 4x. The gap is due to non-uniform convergence — each value requires a different number of Newton iterations, causing idle lanes within each SIMD gang.
+- **Multi-core speedup:** Task ISPC (16.21x) ÷ ISPC no-tasks (2.68x) ≈ **6x** from parallelism across 8 cores (capped by asymmetric P/E-core architecture).
+
 ### Task 2: Input That Maximizes Speedup
 
+Setting all values to `1.0f` (initial guess = 1.0, so `sqrt(1.0) = 1.0` converges in 0 iterations):
+
+```cpp
+values[i] = 1.0f;
+```
+
+| Version | Time (ms) | Speedup |
+|---|---|---|
+| Serial | 7.7 | 1.00x |
+| ISPC (SIMD only) | 2.2 | **3.49x** |
+| ISPC with tasks | 1.9 | **4.12x** |
+
+SIMD speedup improved from 2.68x → **3.49x** (closer to the 4x theoretical max) because all 4 lanes finish in the same number of iterations — zero lane divergence. Multi-core speedup dropped significantly (16x → 4x) because the workload is now so small that task scheduling overhead dominates over computation time.
+
 ### Task 3: Input That Minimizes Speedup
+
+Setting 1 in every 4 elements to `2.999f` (slowest to converge) and the rest to `1.0f` (instant):
+
+```cpp
+values[i] = (i % 4 == 0) ? 2.999f : 1.0f;
+```
+
+| Version | Time (ms) | Speedup |
+|---|---|---|
+| Serial | 252.6 | 1.00x |
+| ISPC (SIMD only) | 371.4 | **0.68x** |
+| ISPC with tasks | 72.1 | **3.50x** |
+
+ISPC is **slower than serial** (0.68x). Each SIMD gang of 4 has 3 lanes that finish immediately (1.0) and 1 lane that requires many iterations (2.999). The 3 fast lanes sit idle while waiting for the slow lane, giving only 25% SIMD utilization. The overhead of SIMD execution on top of 25% utilization pushes performance below serial.
 
 ---
 
