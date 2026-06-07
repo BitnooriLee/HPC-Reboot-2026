@@ -96,25 +96,121 @@ Speedup is now monotonically increasing and the 3-thread anomaly is eliminated.
 
 ## Program 2: Vectorizing Code Using SIMD Intrinsics
 
-*[ To be completed ]*
-
 ### Task 1: Implement `clampedExpVector`
 
+`clampedExpVector` is a vectorized implementation of `clampedExpSerial` using CS149 fake SIMD intrinsics.
+
+**Implementation strategy:**
+
+1. **Process the array in chunks of VECTOR_WIDTH** — For the last chunk where the remaining elements are fewer than VECTOR_WIDTH, use a partial mask via `_cs149_init_ones(remaining)` to activate only the valid lanes.
+2. **Handle `exponent == 0`** — Initialize `result = 1.0` for all valid lanes, then use `_cs149_veq_int` to identify zero-exponent lanes and exclude them from the multiplication loop.
+3. **Accumulation loop** — Use `_cs149_cntbits(maskCountGtZero) > 0` as the loop condition, continuing as long as at least one lane still has `count > 0`. This is necessary because each lane has a different exponent and thus exits the loop at a different iteration.
+4. **Clamp** — Use `_cs149_vgt_float` to identify lanes exceeding 9.999999 and overwrite them.
+
+**Verification results:**
+
+| Input size | Result | Vector Utilization |
+|---|---|---|
+| N=16 (default) | Passed | 85.9% |
+| N=3 (non-multiple) | Passed | 72.9% |
+| N=17 (non-multiple) | Passed | 78.5% |
+
 ### Task 2: Vector Utilization vs. VECTOR_WIDTH
+
+Measured with `./myexp -s 10000` (N=10,000 elements), sweeping VECTOR_WIDTH from 2 to 16:
+
+| VECTOR_WIDTH | Total Vector Instructions | Vector Utilization |
+|:---:|---:|---:|
+| 2 | 168,027 | 86.8% |
+| 4 | 97,059 | 81.2% |
+| 8 | 52,785 | 78.4% |
+| 16 | 27,576 | 77.1% |
+
+**Analysis:**
+
+Vector utilization **decreases** as VECTOR_WIDTH increases.
+
+The root cause lies in the inner while loop of `clampedExpVector`. Each lane holds a different exponent value, so lanes exit the loop at different iterations. As VECTOR_WIDTH grows, a single chunk is more likely to contain one lane with a large exponent that forces all other already-finished lanes to remain idle until it completes. On the other hand, Total Vector Instructions drops by roughly half each time VECTOR_WIDTH doubles — this trade-off between utilization and instruction count is a key consideration when selecting vector width on real hardware.
+
+### Extra Credit: `arraySumVector`
+
+Implemented with `O(N/VECTOR_WIDTH + log2(VECTOR_WIDTH))` complexity instead of the serial `O(N)`.
+
+**Phase 1 — chunk accumulation** `O(N/VECTOR_WIDTH)`: Iterate over the array in steps of VECTOR_WIDTH, adding each chunk into a vector accumulator.
+
+**Phase 2 — in-vector reduction** `O(log2(VECTOR_WIDTH))`: Apply `hadd` + `interleave` for log2(VECTOR_WIDTH) iterations.
+
+```
+sum = [a, b, c, d]
+hadd       → [a+b, a+b, c+d, c+d]
+interleave → [a+b, c+d, a+b, c+d]
+hadd       → [a+b+c+d, ...]
+result = sum.value[0]
+```
+
+Passed for both N=16 and N=10,000.
 
 ---
 
 ## Program 3: Parallel Fractal Generation Using ISPC
 
-*[ To be completed ]*
+**Platform note:** The assignment targets AVX2 8-wide on myth machines. Results here use NEON 4-wide on Apple Silicon (theoretical max 4x instead of 8x).
 
 ### Part 1: ISPC SIMD Speedup
 
+| View | Serial (ms) | ISPC (ms) | Speedup |
+|---|---|---|---|
+| View 1 | 155.6 | 84.4 | **1.84x** |
+| View 2 | — | 53.4 | **1.55x** |
+
+**Maximum expected speedup:** NEON 4-wide → theoretical max **4x** (myth machine AVX2 8-wide → 8x).
+
+**Why actual speedup is well below the theoretical maximum:**
+
+The Mandelbrot computation is non-uniform — pixels in the interior of the set require the maximum number of iterations, while pixels far from the boundary diverge almost immediately. When ISPC processes a gang of 4 program instances (one SIMD vector), all 4 must wait for the slowest element to finish before the gang can retire. This is the same lane utilization problem observed in Program 2: the more divergent the workload, the more idle lanes accumulate.
+
+**Why View 2 shows lower speedup than View 1:**
+
+View 2 zooms into the boundary of the Mandelbrot set, where nearly every pixel requires close to the maximum iteration count. The computation is more uniform in total work but the boundary itself produces a high density of pixels that diverge at different rates, worsening SIMD lane utilization compared to View 1.
+
 ### Part 2: ISPC Tasks (Multi-core)
 
----
+**Baseline (2 tasks):**
 
-## Program 4: Iterative `sqrt`
+| Version | Time (ms) | Speedup over serial |
+|---|---|---|
+| Serial | 155.6 | 1.00x |
+| ISPC (no tasks) | 84.4 | 1.84x |
+| ISPC with 2 tasks | — | 3.57x |
+
+**Task count sweep (View 1):**
+
+| Tasks | Speedup | Notes |
+|:---:|:---:|---|
+| 2 | 3.57x | default |
+| 32 | **10.79x** | optimal |
+| 80 | 10.74x | no further gain |
+
+**Optimal task count: 32**
+
+The machine has 8 cores (4 P-cores + 4 E-cores). Setting tasks = 32 (4× the core count) gives the best speedup by ensuring each core receives multiple tasks. This distributes the load imbalance caused by non-uniform per-row computation costs across all cores — similar to how round-robin interleaving helped in Program 1. Beyond 32 tasks, task scheduling overhead offsets any further load-balancing benefit, so speedup plateaus.
+
+On myth machines (AVX2 8-wide + 8 symmetric cores), the same approach with 32+ tasks is expected to exceed 32x by combining 8x SIMD width with 8x multi-core parallelism minus overhead.
+
+### Extra Credit: Thread Abstraction vs. ISPC Task Abstraction
+
+**Launching 10,000 threads (pthread):**
+Each `pthread_create()` asks the OS to create a real execution unit — allocating a stack (typically several MB), registering with the OS scheduler, and requiring context switches to run on the available cores. Launching 10,000 threads would consume tens of gigabytes of memory, generate massive scheduling overhead, and likely crash or hang the system.
+
+**Launching 10,000 ISPC tasks:**
+ISPC tasks are backed by a thread pool (`tasksys.cpp` maintains a fixed set of worker threads, one per core). A `launch` call simply enqueues a task descriptor into a work queue — it does not create a new OS thread. The fixed pool of worker threads dequeues and executes tasks one by one. Launching 10,000 tasks costs only the memory for 10,000 lightweight task descriptors; the actual concurrency is always bounded by the number of cores.
+
+**Key semantic differences:**
+- `pthread_create/join`: programmer controls thread lifetime explicitly; each thread is an OS-level resource.
+- `launch/sync`: tasks are logical units of work managed by a runtime scheduler; the programmer expresses *what* to compute, not *how many* OS threads to use.
+- ISPC tasks are cheap to create in large numbers, enabling fine-grained load balancing without OS overhead. Threads are expensive and should be created sparingly.
+
+---
 
 *[ To be completed ]*
 

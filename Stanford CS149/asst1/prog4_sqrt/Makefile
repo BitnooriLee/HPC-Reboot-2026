@@ -1,8 +1,8 @@
-CXX=g++ -m64 -march=native
+CXX=g++ -march=native
 CXXFLAGS=-I../common -Iobjs/ -O3 -Wall
 ISPC=ispc
-# note: requires AVX2 capable machine
-ISPCFLAGS=-O3 --target=avx2-i32x8 --arch=x86-64 --pic
+# Apple Silicon: NEON 4-wide (original assignment targets AVX2 8-wide on myth machines)
+ISPCFLAGS=-O3 --target=neon-i32x4 --arch=aarch64 --pic
 
 
 APP_NAME=sqrt
