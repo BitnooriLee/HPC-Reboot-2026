@@ -28,15 +28,15 @@ extern void mandelbrotSerial(
 //
 // Thread entrypoint.
 void workerThreadStart(WorkerArgs * const args) {
-    int rowsPerThread = args->height / args->numThreads;
-    int startRow = args->threadId * rowsPerThread;
-    int numRows = (args->threadId == args->numThreads - 1) ? args->height - startRow : rowsPerThread;
     double startTime = CycleTimer::currentSeconds();
-    
-    mandelbrotSerial(
-        args->x0, args->y0, args->x1, args->y1, 
-        args->width, args->height, startRow, numRows, args->maxIterations, args->output);
-    
+
+    int row = args->threadId;
+    while (row < (int)args->height) {
+        mandelbrotSerial(
+            args->x0, args->y0, args->x1, args->y1, 
+            args->width, args->height, row, 1, args->maxIterations, args->output);
+        row += args->numThreads;
+    }
     double endTime = CycleTimer::currentSeconds();
     printf("Thread %d completed in %f seconds\n", args->threadId, endTime - startTime);
 }
