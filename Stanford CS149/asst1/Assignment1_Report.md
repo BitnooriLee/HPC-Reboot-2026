@@ -263,16 +263,98 @@ ISPC is **slower than serial** (0.68x). Each SIMD gang of 4 has 3 lanes that fin
 
 ## Program 5: BLAS `saxpy`
 
-*[ To be completed ]*
+**Platform note:** Results use NEON 4-wide on Apple Silicon (M-series). The assignment targets AVX2 8-wide on myth machines.
 
 ### Task 1: ISPC Speedup and Analysis
+
+`saxpy` computes `result[i] = scale * X[i] + Y[i]` over N = 20 million elements. Unlike Mandelbrot or sqrt, every element performs identical work with no lane divergence — the workload is **uniform** and **memory-bound**.
+
+| Version | Time (ms) | Bandwidth (GB/s) | GFLOPS | Speedup vs serial |
+|---|---|---|---|---|
+| Serial | 2.87 | 103.9 | 13.9 | 1.00x |
+| ISPC (SIMD only) | 3.18 | 93.6 | 12.6 | 0.90x |
+| ISPC with tasks | 2.91 | 102.5 | 13.8 | 0.99x |
+
+**Speedup from use of tasks (ISPC → task ISPC):** 3.18 / 2.91 ≈ **1.10x**
+
+**Analysis:**
+
+All three versions achieve roughly **100 GB/s** and **14 GFLOPS**, indicating the bottleneck is **memory bandwidth**, not floating-point throughput. The serial loop is already simple enough that the compiler auto-vectorizes effectively; ISPC SIMD alone provides no measurable gain (0.90x vs serial — within run-to-run noise). Adding 64 ISPC tasks yields only ~10% improvement over single-core ISPC (1.10x) and essentially matches serial (0.99x). This is expected: multiple cores share the same memory bus, so additional parallelism cannot exceed the RAM bandwidth ceiling. Task scheduling overhead further limits gains.
+
+**Can performance be substantially improved? Near-linear multi-core speedup?**
+
+**No.** saxpy is memory-bound with uniform, predictable access. ISPC already emits vector loads/stores (NEON 4-wide locally; AVX2 8-wide on myth). Spreading the same memory traffic across more cores does not multiply available bandwidth. Near-linear speedup would require either (a) data that fits entirely in per-core private cache, or (b) a fundamentally different memory access pattern — neither applies to a single 240 MB streaming pass over `X`, `Y`, and `result`. On myth, AVX2 8-wide ISPC should sit closer to the machine's peak STREAM bandwidth, but multi-core task speedup will still plateau near 1x.
+
+### Extra Credit: Why `TOTAL_BYTES = 4 * N * sizeof(float)`?
+
+Although saxpy explicitly touches only three floats per element (load `X[i]`, load `Y[i]`, store `result[i]`), the memory system does not move data one float at a time. CPUs fetch memory in **cache lines** (typically 64 bytes = 16 floats). Reading `X[i]` pulls in neighboring elements along with it, and writing `result[i]` may trigger read-for-ownership or write-back of an entire cache line. The factor of 4 in `TOTAL_BYTES` accounts for this effective traffic: each logical element contributes approximately four floats (16 bytes) of movement through the cache hierarchy, not just the three floats directly named in the source.
+
+### Extra Credit: Performance Improvement Ideas (not implemented)
+
+- **Use a production BLAS** (OpenBLAS, Intel MKL): hand-tuned AVX2/AVX-512 kernels with optimal unrolling, prefetching, and multi-threading tuned to the memory hierarchy.
+- **Manual AVX2 intrinsics with software prefetch** (`_mm_prefetch`): hide DRAM latency by prefetching upcoming cache lines of `X` and `Y` while computing the current chunk.
+- **Loop tiling / cache blocking**: process the array in L1/L2-sized blocks so `X` and `Y` chunks are reused from cache before eviction (more relevant when the working set is smaller than N).
+- **NUMA-aware allocation and pinning**: on multi-socket systems, allocate `X`, `Y`, `result` on local memory and pin threads to nearby cores.
+- **Wider SIMD (AVX-512, 16-wide)**: only on hardware that supports it; myth assignment machines are AVX2-limited to 8-wide.
+
+A best-possible implementation on myth would likely reach near-peak STREAM bandwidth (~40–50 GB/s on Core i7 class hardware) via MKL/OpenBLAS, but would still not achieve near-linear multi-core speedup on this single large streaming pass because the bottleneck remains shared DRAM bandwidth.
 
 ---
 
 ## Program 6: Making K-Means Faster
 
-*[ To be completed ]*
+**Platform note:** Results use locally generated data (M=1,000,000, N=100, K=3, ε=0.1) on Apple Silicon M-series (8 cores). Official grading uses `data.dat` from myth; algorithm and optimization are identical.
 
-### Profiling: Identifying the Bottleneck
+### Step 1–2: Setup and Visualization
 
-### Optimization: Parallelization Approach and Speedup
+- Built and ran `./kmeans` (local data fallback when myth/AFS unavailable).
+- Verified clustering output with `python plot.py` → `start.png` and `end.png` produced successfully.
+
+### Step 3: Profiling — Identifying the Bottleneck
+
+Inserted `CycleTimer::currentSeconds()` around each phase inside the K-Means `while` loop in `kmeansThread.cpp` (separate from `main.cpp`'s total-time timer, which only measures the whole algorithm).
+
+**Starter code (serial `computeAssignments`), 50 iterations:**
+
+| Phase | Time (ms) | Share |
+|---|---|---|
+| computeAssignments | 8,727 | **74.7%** |
+| computeCost | 2,137 | 18.3% |
+| computeCentroids | 819 | 7.0% |
+| **Total (profiled)** | **11,683** | 100% |
+
+**Conclusion:** `computeAssignments` is the clear hotspot. Each iteration performs K×M distance computations (K=3, M=1,000,000, N=100 dimensions per `dist` call). `computeCentroids` and `computeCost` are comparatively cheap.
+
+### Step 4: Optimization — Parallel `computeAssignments`
+
+**Approach:** Parallelize only `computeAssignments` (per assignment constraints). Split the M dimension across 8 `std::thread` workers using block decomposition:
+
+```
+Thread i handles m in [i*M/8, (i+1)*M/8)
+```
+
+Each thread runs `computeAssignmentsRange()` over its disjoint `m` range. Writes go to distinct `clusterAssignments[m]` entries — no locks or synchronization needed. Loop order changed from (k outer, m inner) to (m outer, k inner) within each range; semantics unchanged.
+
+Pattern follows Program 1: spawn 7 worker threads + main thread executes thread 0's range, then `join()`.
+
+**After parallelization, 50 iterations:**
+
+| Phase | Time (ms) | Share |
+|---|---|---|
+| computeAssignments | 1,638 | 37.0% |
+| computeCost | 2,038 | 46.1% |
+| computeCentroids | 745 | 16.8% |
+| **Total (profiled)** | **4,421** | 100% |
+
+| Metric | Before | After | Speedup |
+|---|---|---|---|
+| Total runtime | 11,683 ms | 4,421 ms | **2.64x** |
+| computeAssignments | 8,727 ms | 1,638 ms | **5.33x** |
+
+Target of 2.1x exceeded. `plot.py` output after optimization remains visually consistent with the starter (reasonable cluster assignments).
+
+**Why block decomposition over M works:** M=1,000,000 is large and uniform — each data point requires the same K distance computations. K=3 is too small to parallelize meaningfully. Splitting M gives near-linear speedup on the hotspot until thread overhead and the remaining serial phases (`computeCost`, `computeCentroids`) dominate.
+
+**Why not parallelize the other functions:** Only one function may be parallelized per assignment rules. `computeAssignments` accounts for ~75% of runtime; parallelizing it yields the highest return.
+
+---

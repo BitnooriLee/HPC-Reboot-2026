@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <math.h>
 #include <random>
@@ -77,6 +78,39 @@ void initCentroids(double *clusterCentroids, int K, int N) {
   }
 }
 
+static void initLocalData(double **data, double **clusterCentroids,
+                          int **clusterAssignments, int *M_p, int *N_p,
+                          int *K_p, double *epsilon_p) {
+  *M_p = 1000000;
+  *N_p = 100;
+  *K_p = 3;
+  *epsilon_p = 0.1;
+
+  int M = *M_p;
+  int N = *N_p;
+  int K = *K_p;
+
+  *data = new double[M * N];
+  *clusterCentroids = new double[K * N];
+  *clusterAssignments = new int[M];
+
+  initData(*data, M, N);
+  initCentroids(*clusterCentroids, K, N);
+
+  for (int m = 0; m < M; m++) {
+    double minDist = 1e30;
+    int bestAssignment = -1;
+    for (int k = 0; k < K; k++) {
+      double d = dist(&(*data)[m * N], &(*clusterCentroids)[k * N], N);
+      if (d < minDist) {
+        minDist = d;
+        bestAssignment = k;
+      }
+    }
+    (*clusterAssignments)[m] = bestAssignment;
+  }
+}
+
 int main() {
   srand(SEED);
 
@@ -88,44 +122,18 @@ int main() {
   int *clusterAssignments;
 
   // NOTE: we will grade your submission using the data in data.dat
-  // which is read by this function
-  readData("./data.dat", &data, &clusterCentroids, &clusterAssignments, &M, &N,
-           &K, &epsilon);
-
-  // NOTE: if you want to generate your own data (for fun), you can use the
-  // below code
-  /*
-  M = 1e6;
-  N = 100;
-  K = 3;
-  epsilon = 0.1;
-
-  data = new double[M * N];
-  clusterCentroids = new double[K * N];
-  clusterAssignments = new int[M];
-
-  // Initialize data
-  initData(data, M, N);
-  initCentroids(clusterCentroids, K, N);
-
-  // Initialize cluster assignments
-  for (int m = 0; m < M; m++) {
-    double minDist = 1e30;
-    int bestAssignment = -1;
-    for (int k = 0; k < K; k++) {
-      double d = dist(&data[m * N], &clusterCentroids[k * N], N);
-      if (d < minDist) {
-        minDist = d;
-        bestAssignment = k;
-      }
-    }
-    clusterAssignments[m] = bestAssignment;
+  ifstream dataProbe("./data.dat", ios::binary);
+  if (dataProbe.good()) {
+    dataProbe.close();
+    readData("./data.dat", &data, &clusterCentroids, &clusterAssignments, &M,
+             &N, &K, &epsilon);
+  } else {
+    cerr << "Note: data.dat not found (myth/AFS unavailable). "
+         << "Generating local data for development (M=1e6, N=100, K=3)."
+         << endl;
+    initLocalData(&data, &clusterCentroids, &clusterAssignments, &M, &N, &K,
+                  &epsilon);
   }
-
-  // Uncomment to generate data file
-  // writeData("./data.dat", data, clusterCentroids, clusterAssignments, &M, &N,
-  //           &K, &epsilon);
-  */
 
   printf("Running K-means with: M=%d, N=%d, K=%d, epsilon=%f\n", M, N,
          K, epsilon);
