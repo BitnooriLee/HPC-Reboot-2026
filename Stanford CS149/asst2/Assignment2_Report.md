@@ -5,6 +5,77 @@
 
 ---
 
+## Assignment Overview
+
+Assignment 2 asks you to build a **C++ task execution library** — a small parallel runtime that applications use to launch many tasks efficiently on a multi-core CPU.
+
+**Part A:** Implement synchronous **bulk task launch** via `run(runnable, num_total_tasks)`.
+
+**Part B:** Extend the library with **async task graphs** via `runAsyncWithDeps()` and `sync()`.
+
+The starter code provides four task system classes. You implement three of them (Serial is the baseline). Each step adds complexity and targets better performance on different workloads.
+
+---
+
+## Core Concepts
+
+### Bulk task launch
+
+One call to `run()` launches `num_total_tasks` instances of the same task:
+
+```cpp
+t->run(&myTask, 100);  // launches 100 tasks (task_id 0..99)
+```
+
+Each task is invoked as:
+
+```cpp
+runnable->runTask(task_id, num_total_tasks);
+```
+
+The application defines *what* each task does (`IRunnable`). Your task system defines *how* tasks are scheduled across threads.
+
+### Synchronous `run()`
+
+When `run()` returns, **all tasks in that bulk launch must be finished**. The calling thread blocks until completion. This is different from Part B's async API.
+
+### Key files
+
+| File | Role |
+|------|------|
+| `itasksys.h` | Interface (`IRunnable`, `ITaskSystem`) — **do not modify** |
+| `tasksys.h` | Class declarations (your member variables go here) |
+| `tasksys.cpp` | Implementations (your main work) |
+| `tests/tests.h` | Test definitions — read to understand workloads |
+| `tests/main.cpp` | Test driver — maps test names to functions |
+
+`.h` = declarations ("what exists"). `.cpp` = definitions ("how it works"). Only modify `tasksys.h` and `tasksys.cpp`; do not change the `Makefile`.
+
+---
+
+## The Four Task System Variants
+
+These names are **defined by the assignment starter code**, not universal industry terms. Each class implements `name()` with a fixed label used in test output:
+
+| Step | Class | `name()` output | Idea |
+|------|-------|-----------------|------|
+| (baseline) | `TaskSystemSerial` | `Serial` | One thread, sequential `runTask` loop |
+| 1 | `TaskSystemParallelSpawn` | `Parallel + Always Spawn` | New threads on every `run()`, then `join()` |
+| 2 | `TaskSystemParallelThreadPoolSpinning` | `Parallel + Thread Pool + Spin` | Persistent thread pool; idle workers **busy-wait** |
+| 3 | `TaskSystemParallelThreadPoolSleeping` | `Parallel + Thread Pool + Sleep` | Same pool; idle workers and main thread **sleep** on condition variables |
+
+**Mapping to general terminology:**
+
+- **Serial** → single-threaded execution
+- **Spawn / Always Spawn** → per-call thread creation (assignment-specific label)
+- **Thread pool** → standard term; workers created once, reused
+- **Spin / spinning** → busy-wait loop while checking a flag (standard term)
+- **Sleep** → block on `std::condition_variable` until notified (standard term)
+
+Part B builds on **Step 3 (Sleeping)** only — you add `runAsyncWithDeps()` and `sync()` to that class.
+
+---
+
 ## Local Development Instead of AWS
 
 The assignment README and `cloud_readme.md` recommend an AWS `c7g.4xlarge` instance (16-core ARM Graviton3) for performance testing and official grading. **This project was completed on a local Mac instead of AWS** for the following reasons:
@@ -73,14 +144,58 @@ python3 ../tests/run_test_harness.py -n 8 -t super_super_light super_light
 
 ### How tests call `run()`
 
-1. `tests/main.cpp` maps test name `simple_test_sync` → function `simpleTestSync`
-2. `simpleTestSync` → `simpleTest(t, false)` in `tests/tests.h`
-3. `simpleTest` calls `t->run(&first, num_tasks)` and `t->run(&second, num_tasks)` twice
-4. `main.cpp` runs all four task system implementations (Serial, Spawn, Spin, Sleep) and prints timing
+The README says to run `./runtasks -n 8 simple_test_sync` but does not spell out the call chain. The path is:
+
+```
+./runtasks -n 8 simple_test_sync
+        │
+        ▼
+tests/main.cpp
+  - matches "simple_test_sync" → simpleTestSync()
+  - creates each task system (Serial, Spawn, Spin, Sleep)
+  - calls test function with ITaskSystem* t
+        │
+        ▼
+tests/tests.h → simpleTestSync(t) → simpleTest(t, false)
+        │
+        ▼
+t->run(&first, 3);
+t->run(&second, 3);    ← two bulk launches, 3 tasks each
+```
+
+For debugging, add print statements inside `simpleTest()` in `tests/tests.h`.
+
+### Performance grading
+
+`run_test_harness.py` compares student `runtasks` vs `runtasks_ref_osx_arm`. **PERF** = student time / reference time. Values ≤ 1.0 mean you are at or faster than reference. Part A requires within **20%** of reference (PERF ≤ 1.2) for full performance points, on implementations that pass correctness.
 
 ---
 
 ## Part A
+
+### Design progression (Steps 1 → 2 → 3)
+
+```
+Step 1 Spawn          Step 2 Spin Pool         Step 3 Sleep Pool
+─────────────────     ───────────────────      ────────────────────
+run() → create N      run() → signal pool      run() → signal pool
+        threads               workers                  workers
+        join()                  spin-wait                sleep on cv
+        return                  spin-wait                sleep on cv
+                                return                   return
+(per run() overhead)  (no thread create)       (no thread create
+                                                 + no CPU spin)
+```
+
+| Concern | Spawn | Spin Pool | Sleep Pool |
+|---------|-------|-----------|------------|
+| Thread creation per `run()` | Yes | No | No |
+| Idle worker CPU usage | N/A (threads exit) | High (spin) | Low (blocked) |
+| Main thread while waiting | Blocked on `join()` | Spins | Sleeps on cv |
+| Task assignment | Static round-robin | Dynamic (planned) | Dynamic (planned) |
+| Synchronization | None needed | mutex + atomic | mutex + cv + atomic |
+
+---
 
 ### Step 1: `TaskSystemParallelSpawn` — Done
 
@@ -130,9 +245,9 @@ auto worker = [&](int thread_id) {
 | super_light | Serial | 17.93 | 28.82 | 0.62 (OK) |
 | super_light | Parallel + Always Spawn | 29.536 | 30.399 | 0.97 (OK) |
 
-Spawn implementation meets the 20% performance threshold vs. reference on these tests. Thread pool variants (Spin, Sleep) still run serial starter code at this point — they appear fast only because reference pool implementations are slower on light workloads while student code is still serial.
+Spawn meets the 20% threshold on these tests. Spin and Sleep still run serial starter code at this point — their student times look fast only because reference pool code is slower on light workloads while our implementations are still serial.
 
-**Limitation (motivation for Step 2):** Every `run()` creates and destroys threads. For tests with many cheap bulk launches (e.g. `ping_pong`, `spin_between_run_calls`), thread creation overhead dominates. Step 2 addresses this with a persistent thread pool.
+**Limitation (motivation for Step 2):** Every `run()` creates and destroys threads. Tests like `ping_pong` (400 bulk launches) and `spin_between_run_calls` amplify this overhead. Step 2 removes per-call thread creation.
 
 ---
 
@@ -140,39 +255,95 @@ Spawn implementation meets the 20% performance threshold vs. reference on these 
 
 **Goal:** Create worker threads once in the constructor; workers spin-wait for work instead of being recreated per `run()`.
 
-**Planned design:**
+#### Architecture
 
-| Component | Role |
-|-----------|------|
+```
+Constructor: spawn num_threads_ workers → each enters workerLoop() forever
+
+run() [main thread]:
+  1. Publish launch state (runnable, num_total_tasks, reset counters)
+  2. Set work_available_ = true
+  3. Spin until tasks_completed_ == num_total_tasks_
+  4. Clear work_available_, return
+
+workerLoop() [pool threads]:
+  1. Spin until work_available_ || shutdown_
+  2. Atomic fetch next_task_id_; if invalid, spin until launch ends
+  3. runTask(); increment tasks_completed_
+  4. Last task done → work_available_ = false
+
+Destructor: shutdown_ = true, wake workers, join all
+```
+
+#### Planned `tasksys.h` members
+
+| Member | Role |
+|--------|------|
 | `std::vector<std::thread> workers_` | Pool threads, created in constructor |
-| `std::mutex mutex_` | Protect launch state setup/teardown |
-| `std::atomic<int> next_task_id_` | Dynamic task assignment (fetch-and-add) |
-| `std::atomic<int> tasks_completed_` | Count finished tasks; main spins until `== num_total_tasks` |
-| `bool work_available_` / `launch_active_` | Signal workers that a new bulk launch started |
-| `bool shutdown_` | Destructor sets true; workers exit loop and join |
+| `std::mutex mutex_` | Protect launch state setup |
+| `std::atomic<bool> shutdown_` | Destructor signals workers to exit |
+| `std::atomic<bool> work_available_` | New bulk launch is active |
+| `IRunnable* runnable_` | Current task object |
+| `int num_total_tasks_` | Tasks in current launch |
+| `std::atomic<int> next_task_id_` | Dynamic assignment counter |
+| `std::atomic<int> tasks_completed_` | Finished task count |
+| `void workerLoop()` | Private worker entry point |
 
-**Worker loop (spinning):**
+#### Worker loop detail
 
-1. Spin while no work and not shutdown.
-2. Atomically grab next `task_id`; if `>= num_total_tasks`, continue (other workers may still have tasks).
-3. Call `runnable_->runTask(task_id, num_total_tasks)`.
-4. Increment `tasks_completed_`; loop back to wait for next launch.
+1. **Wait for work (spin):** `while (!work_available_ && !shutdown_) { }`
+2. **Grab task (dynamic):** `task_id = next_task_id_++`
+3. **No task left for this worker:** if `task_id >= num_total_tasks_`, spin until `!work_available_` (other workers may still be running), then loop back
+4. **Execute:** `runnable_->runTask(task_id, num_total_tasks_)`
+5. **Completion:** if `++tasks_completed_ == num_total_tasks_`, set `work_available_ = false`
 
-**`run()` (main thread):**
+**Why dynamic assignment (vs Step 1 static):** Tests like `ping_pong_unequal` give lower-index tasks more work. Static assignment can leave some threads idle while one thread is slow. An atomic task counter lets fast threads pick up remaining work.
 
-1. Under mutex: set `runnable_`, `num_total_tasks_`, reset counters, set `work_available_ = true`.
-2. Spin until `tasks_completed_ == num_total_tasks_` (synchronous return).
-3. Under mutex: clear `work_available_`.
+#### Main thread synchronous wait
 
-**Task assignment:** Dynamic (atomic counter) — better load balance when per-task cost varies.
+Main spins: `while (tasks_completed_ < num_total_tasks_) { }`
 
-**Step 3 preview:** Replace spin-waits with `std::condition_variable` so idle workers and the main thread sleep instead of burning CPU.
+This is the answer to the README question: **`run()` does not return until the completion counter reaches `num_total_tasks_`.**
+
+#### Edge cases to handle
+
+- **`num_total_tasks == 0`:** return immediately, no state change
+- **`num_threads_ <= 1`:** serial fallback (same as Step 1)
+- **Workers > tasks:** extra workers get `task_id >= num_total_tasks`, spin until launch completes
+- **Back-to-back `run()` calls:** reset all counters before setting `work_available_ = true`; previous launch must be fully done before main returns
+- **Destructor:** set `shutdown_ = true` and ensure spinning workers can exit (may need to set `work_available_ = true` as a wake-up)
+
+#### Tests to run after implementation
+
+```bash
+./runtasks -n 8 simple_test_sync
+python3 ../tests/run_test_harness.py -n 8 -t ping_pong_equal super_light super_super_light
+```
+
+`ping_pong_equal` is the key test where thread pool should beat spawn.
 
 ---
 
 ### Step 3: `TaskSystemParallelThreadPoolSleeping` — Not started
 
-*To be filled after implementation.*
+**Goal:** Same thread pool structure as Step 2, but replace busy-wait loops with **`std::condition_variable`** so idle workers and the main thread do not consume CPU while waiting.
+
+**Changes from Step 2:**
+
+| Waiting situation | Step 2 (Spin) | Step 3 (Sleep) |
+|-------------------|---------------|----------------|
+| Worker, no work | `while (!work_available_) {}` | `workers_cv_.wait(lock, ...)` |
+| Worker, no tasks left this launch | spin until `!work_available_` | `workers_cv_.wait(...)` |
+| Main, tasks not done | `while (completed < total) {}` | `main_cv_.wait(lock, ...)` |
+| New work arrives | set atomic flag | set flag + `notify_all()` |
+
+**Additional members:** `std::condition_variable workers_cv_`, `std::condition_variable main_cv_`
+
+**Why it matters:** On `super_light` / `ping_pong`, a spinning main thread competes with workers for CPU cycles. Sleeping yields the core to workers doing useful work.
+
+**Part B note:** Step 3's class is extended with `runAsyncWithDeps()` and `sync()`. The dependency tracking (waiting queue vs ready queue) builds on this sleeping pool.
+
+*Implementation details to be filled after Step 2 is complete.*
 
 ---
 
@@ -180,9 +351,14 @@ Spawn implementation meets the 20% performance threshold vs. reference on these 
 
 Implement on top of Step 3 sleeping thread pool:
 
-- `runAsyncWithDeps()` — async bulk launch with dependency vector
-- `sync()` — block until all prior async launches complete
-- Dependency tracking: waiting tasks vs. ready queue
+- **`runAsyncWithDeps(runnable, num_total_tasks, deps)`** — returns immediately with a `TaskID`; tasks may still be running
+- **`sync()`** — blocks until all prior async launches complete
+- **Dependency rule:** tasks in a launch cannot start until all tasks in every `deps` launch have finished
+
+**Planned data structures:**
+
+1. **Waiting set** — launches whose dependencies are not yet satisfied
+2. **Ready queue** — tasks that can run now; workers pull from here
 
 *Writeup question on dependency tracking: TBD after implementation.*
 
@@ -196,21 +372,29 @@ Implement on top of Step 3 sleeping thread pool:
 
 - Step 1: spawn-per-`run()` — no pool.
 - Step 2 (planned): fixed pool in constructor, destroyed in destructor.
+- Step 3 (planned): same pool + condition variables for idle/synchronization.
 
 **Task assignment (so far):**
 
 - Step 1: **static** round-robin by thread id.
-- Step 2 (planned): **dynamic** via atomic `next_task_id_`.
+- Steps 2–3 (planned): **dynamic** via atomic `next_task_id_`.
 
 **Part B dependencies:** TBD.
 
 ### 2. When simpler implementations win
 
-*TBD after Steps 2–3 — compare Serial vs Spawn vs Thread Pool on tests like `super_super_light` (cheap tasks), `mandelbrot_chunked` (heavy tasks), `ping_pong` (many launches).*
+Expected patterns (to confirm with measurements after Steps 2–3):
+
+| Workload type | Example test | Likely winner | Why |
+|---------------|----------------|---------------|-----|
+| Very cheap tasks, few launches | `super_super_light` | **Serial** or Spawn | Pool/sync overhead exceeds useful work |
+| Many cheap launches | `ping_pong`, `spin_between_run_calls` | **Thread pool** | Amortizes thread creation; spawn loses |
+| Heavy per-task work | `mandelbrot_chunked`, `recursive_fibonacci` | **Parallel** (any) | Compute dominates; overhead negligible |
+| Uneven task cost | `ping_pong_unequal` | **Pool + dynamic** | Static assignment leaves threads idle |
 
 ### 3. Custom test
 
-*Not yet implemented. Skeleton: `YourTask` / `yourTest()` in `tests/tests.h`.*
+*Not yet implemented. Skeleton: `YourTask` / `yourTest()` in `tests/tests.h`. Must register in `tests/main.cpp`.*
 
 ---
 
@@ -218,4 +402,5 @@ Implement on top of Step 3 sleeping thread pool:
 
 | Date | Update |
 |------|--------|
-| 2026-06-12 | Report created. Local Mac workflow documented (AWS skipped). Part A Step 1 implemented and tested. Step 2 design documented. |
+| 2026-06-12 | Report created. Local Mac workflow documented (AWS skipped). Part A Step 1 implemented and tested. |
+| 2026-06-12 | Expanded: assignment overview, core concepts, four-variant terminology, test call chain, Step 1–3 design comparison, detailed Step 2 plan, Step 3 preview, writeup draft for Q2. |
